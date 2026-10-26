@@ -1,0 +1,77 @@
+'use strict';
+const test = require('node:test');
+const assert = require('node:assert/strict');
+const fs = require('node:fs');
+const os = require('node:os');
+const path = require('node:path');
+const vm = require('node:vm');
+const { createInterviewPrompt } = require('../meeting-copilot/interview-prompt.cjs');
+const { createRouter } = require('../meeting-copilot/multimodal-router.cjs');
+
+test('interview prompt saves/reloads and external edits are hot-read; invalid drafts never overwrite it', t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-prompt-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const file = path.join(directory, 'interview.md');
+  const store = createInterviewPrompt({ file, original: 'original' });
+  assert.equal(store.read(), 'original');
+  store.save('  请简短回答。\n保留技术要点。\n');
+  const next = createInterviewPrompt({ file, original: 'original' });
+  assert.equal(next.read(), '  请简短回答。\n保留技术要点。\n');
+  for (const invalid of ['', '  ', null, 'x'.repeat(64001)]) assert.throws(() => next.save(invalid));
+  assert.equal(store.read(), '  请简短回答。\n保留技术要点。\n');
+  fs.writeFileSync(file, 'external');
+  assert.equal(store.read(), 'external');
+  fs.writeFileSync(file, '');
+  assert.equal(store.read(), 'original', 'invalid external edits must not crash the main process');
+  assert.equal(store.getPublic().interview, 'original');
+  assert.ok(store.getPublic().warning);
+});
+
+const patchedMain = process.env.MC_PATCHED_MAIN || path.resolve(__dirname, '../work/rich-answers-check/main.cjs');
+test('actual patched text builders and interview multimodal share the configured prompt; written and translation stay independent', { skip: !fs.existsSync(patchedMain) && 'Run install_rich_answers_prompt.py --check to generate the real-bundle fixture' }, t => {
+  const directory = fs.mkdtempSync(path.join(os.tmpdir(), 'mc-prompt-builders-'));
+  t.after(() => fs.rmSync(directory, { recursive: true, force: true }));
+  const router = createRouter({ directory, defaultsDirectory: path.resolve(__dirname, '../meeting-copilot/prompts'), safeStorage: { isEncryptionAvailable: () => true }, transport: () => { throw new Error('No network in tests'); } });
+  router.initialize();
+  router.applyPatch({ ...router.getPublic(), mode: 'interview' });
+  const store = createInterviewPrompt({ file: path.join(router.promptDir, 'interview.md'), original: 'original' });
+  store.save('自定义：先说结论，再说原因。');
+  const main = fs.readFileSync(patchedMain, 'utf8');
+  const slice = main.slice(main.indexOf('const MAX_CONTEXT_CHARS'), main.indexOf('const IPC = {', main.indexOf('const MAX_CONTEXT_CHARS')));
+  const builders = vm.runInNewContext(slice + '\ninterviewPromptStore = store; ({ buildAnswerMessages, buildStablePrefix });', { store, classifyQuestion: () => 'other' });
+  const input = { mode: 'segment', question: '说明项目', recentTranscript: ['介绍项目'], resume: '真实项目', jd: '研发', memo: '以前的对话', history: [{ role: 'assistant', content: '前一个回答' }] };
+  const built = builders.buildAnswerMessages(input);
+  assert.ok(built[0].content.startsWith(store.read()));
+  assert.ok(built[0].content.includes('真实项目'));
+  assert.ok(built[0].content.includes('研发'));
+  assert.ok(built.some(message => message.content.includes('以前的对话')));
+  assert.ok(built.some(message => message.content === '前一个回答'));
+  const unified = router.buildMessages({ ...input, originalMessages: built, originalPersona: store.read() });
+  assert.ok(unified[0].content.startsWith(store.read()));
+  assert.ok(unified[0].content.includes('真实项目'));
+  const free = builders.buildAnswerMessages({ ...input, mode: 'free', freeQuestion: '自由问题' });
+  assert.equal(free[0].role, 'system');
+  assert.equal(free[0].content, store.read());
+  const translation = builders.buildAnswerMessages({ ...input, mode: 'translate', question: 'Hello' });
+  assert.ok(!translation[0].content.includes(store.read()));
+  store.save('新的面试规则');
+  assert.ok(builders.buildStablePrefix('', '', 'chinese').startsWith('新的面试规则'));
+  router.applyPatch({ ...router.getPublic(), mode: 'written' });
+  const written = router.buildMessages({ ...input, originalMessages: built, originalPersona: store.read() });
+  assert.ok(!written[0].content.includes('新的面试规则'));
+  assert.ok(written[0].content.includes('25 行以内'));
+});
+
+test('prompt editor changes are drafts and restoring original requires explicit save', () => {
+  const source = fs.readFileSync(path.resolve(__dirname, '../meeting-copilot/interview-prompt-ui.js'), 'utf8');
+  const element = (type, props) => ({ type, props });
+  const editor = vm.runInNewContext(source + '\nInterviewPromptSettings;', { jsxRuntimeExports: { jsx: element, jsxs: element } });
+  const changes = [];
+  const tree = editor({ value: 'custom', defaultValue: 'original', onChange: value => changes.push(value) });
+  const all = node => !node || typeof node !== 'object' ? [] : [node, ...[node.props?.children].flat().flatMap(all)];
+  const nodes = all(tree);
+  const area = nodes.find(node => node.type === 'textarea');
+  area.props.onChange({ target: { value: 'new' } });
+  nodes.find(node => node.type === 'button').props.onClick();
+  assert.deepEqual(changes, ['new', 'original']);
+});

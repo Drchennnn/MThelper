@@ -1,0 +1,133 @@
+--- a/out/main/index.js
++++ b/out/main/index.js
+@@ -2410,25 +2410,21 @@
+ }
+ const MODEL_ID = "onnx-community/whisper-large-v3-turbo-ONNX";
+ const RELEASES_URL = "https://github.com/JWM0203/MeetingCopilot/releases/latest";
+-const regionOverlayHtml = (tip) => `<!doctype html><html><head><meta charset="utf-8"><style>
+-html,body{margin:0;height:100%;overflow:hidden;cursor:crosshair;user-select:none}
+-#img{position:fixed;inset:0;width:100vw;height:100vh;object-fit:fill}
+-#dim{position:fixed;inset:0;background:rgba(0,0,0,0.35)}
+-#sel{position:fixed;display:none;border:2px solid #2a6df4;box-shadow:0 0 0 9999px rgba(0,0,0,0.35)}
+-#tip{position:fixed;top:14px;left:50%;transform:translateX(-50%);color:#fff;background:rgba(0,0,0,0.65);padding:6px 14px;border-radius:8px;font:13px 'Microsoft YaHei',sans-serif;z-index:9}
+-</style></head><body>
+-<img id="img"/><div id="dim"></div><div id="sel"></div>
+-<div id="tip">${tip}</div>
+-<script>
+-(async()=>{try{const u=await window.mc.regionImage();if(u){document.getElementById('img').src=u;}}catch(e){}})();
+-let sx,sy,drag=false;const sel=document.getElementById('sel'),dim=document.getElementById('dim');
+-function rect(e){return{x:Math.min(sx,e.clientX),y:Math.min(sy,e.clientY),width:Math.abs(e.clientX-sx),height:Math.abs(e.clientY-sy)};}
+-function upd(e){const r=rect(e);sel.style.left=r.x+'px';sel.style.top=r.y+'px';sel.style.width=r.width+'px';sel.style.height=r.height+'px';}
+-addEventListener('mousedown',e=>{drag=true;sx=e.clientX;sy=e.clientY;dim.style.display='none';sel.style.display='block';upd(e);});
+-addEventListener('mousemove',e=>{if(drag)upd(e);});
+-addEventListener('mouseup',e=>{if(!drag)return;drag=false;const r=rect(e);if(r.width>4&&r.height>4)window.mc.regionRect(r);else window.mc.regionCancel();});
+-addEventListener('keydown',e=>{if(e.key==='Escape')window.mc.regionCancel();});
+-<\/script></body></html>`;
++async function captureQuietScreenshot() {
++  const directory = await fs.promises.mkdtemp(path.join(os.tmpdir(), "meeting-copilot-shot-"));
++  const file = path.join(directory, "screen.png");
++  try {
++    const executable = path.join(process.resourcesPath, "tools", "QuietCapture.exe");
++    await new Promise((resolve, reject) => {
++      child_process.execFile(executable, ["--capture-once", file], { windowsHide: true, timeout: 15000 }, (error) => error ? reject(error) : resolve());
++    });
++    const image = await fs.promises.readFile(file);
++    return "data:image/png;base64," + image.toString("base64");
++  } finally {
++    await fs.promises.rm(file, { force: true });
++    await fs.promises.rmdir(directory);
++  }
++}
+ electron.app.setName("MeetingCopilot");
+ if (process.env.MC_USERDATA) electron.app.setPath("userData", process.env.MC_USERDATA);
+ if (!electron.app.requestSingleInstanceLock()) {
+@@ -2995,79 +2991,7 @@
+     });
+     electron.ipcMain.handle(IPC.sessionsLoad, () => sessionStore.load());
+     electron.ipcMain.on(IPC.sessionsSave, (_e, data) => sessionStore.save(data));
+-    let regionResolve = null;
+-    let pendingRegionImage = null;
+-    let regionWin = null;
+-    electron.ipcMain.handle(IPC.regionImage, () => pendingRegionImage);
+-    electron.ipcMain.on(IPC.regionRect, (_e, r) => {
+-      const f = regionResolve;
+-      regionResolve = null;
+-      regionWin?.close();
+-      f?.(r);
+-    });
+-    electron.ipcMain.on(IPC.regionCancel, () => {
+-      const f = regionResolve;
+-      regionResolve = null;
+-      regionWin?.close();
+-      f?.(null);
+-    });
+-    electron.ipcMain.handle(IPC.regionPick, async () => {
+-      const disp = electron.screen.getPrimaryDisplay();
+-      const sf = disp.scaleFactor;
+-      const w = Math.round(disp.size.width * sf);
+-      const h = Math.round(disp.size.height * sf);
+-      const sources = await electron.desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: w, height: h } });
+-      const src = sources.find((s) => s.display_id === String(disp.id)) ?? sources[0];
+-      if (!src) return null;
+-      const full = src.thumbnail;
+-      pendingRegionImage = full.toDataURL();
+-      const rect = await new Promise((resolve) => {
+-        regionResolve = resolve;
+-        const b = disp.bounds;
+-        const ov = new electron.BrowserWindow({
+-          x: b.x,
+-          y: b.y,
+-          width: b.width,
+-          height: b.height,
+-          frame: false,
+-          alwaysOnTop: true,
+-          skipTaskbar: true,
+-          hasShadow: false,
+-          resizable: false,
+-          movable: false,
+-          fullscreenable: false,
+-          enableLargerThanScreen: true,
+-          webPreferences: { preload: path.join(__dirname, "../preload/index.js"), contextIsolation: true }
+-        });
+-        regionWin = ov;
+-        ov.setContentProtection(true);
+-        ov.setAlwaysOnTop(true, "screen-saver");
+-        ov.on("closed", () => {
+-          if (regionResolve) {
+-            const f = regionResolve;
+-            regionResolve = null;
+-            f(null);
+-          }
+-          regionWin = null;
+-        });
+-        void ov.loadURL("data:text/html;charset=utf-8," + encodeURIComponent(regionOverlayHtml(T().regionTip)));
+-      });
+-      const img = pendingRegionImage;
+-      pendingRegionImage = null;
+-      if (!rect || rect.width < 4 || rect.height < 4 || !img) return null;
+-      try {
+-        const cropped = full.crop({
+-          x: Math.round(rect.x * sf),
+-          y: Math.round(rect.y * sf),
+-          width: Math.round(rect.width * sf),
+-          height: Math.round(rect.height * sf)
+-        });
+-        return cropped.toDataURL();
+-      } catch (e) {
+-        console.error("[region] crop failed:", e.message);
+-        return null;
+-      }
+-    });
++    electron.ipcMain.handle(IPC.regionPick, () => captureQuietScreenshot());
+     electron.ipcMain.handle(IPC.stealthSet, (_e, on) => {
+       settings.applyPatch({ ui: { stealth: on } });
+       win?.setContentProtection(on);
+@@ -3185,7 +3109,7 @@
+         }
+         const ac = new AbortController();
+         llmControllers.set(payload.requestId, ac);
+-        const imgP = payload.imageDataUrl ? Promise.resolve(payload.imageDataUrl) : electron.desktopCapturer.getSources({ types: ["screen"], thumbnailSize: { width: 1600, height: 900 } }).then((sources) => sources[0].thumbnail.toDataURL());
++        const imgP = payload.imageDataUrl ? Promise.resolve(payload.imageDataUrl) : captureQuietScreenshot();
+         imgP.then(
+           (dataUrl) => visionChat(
+             { baseUrl: vision2.baseUrl, model: vision2.model, apiKey, proxyUrl: vision2.proxyUrl },

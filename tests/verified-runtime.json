@@ -1,0 +1,11 @@
+{
+  "pngDataUrl": true,
+  "dimensions": {
+    "width": 2560,
+    "height": 1600
+  },
+  "encodedBytes": 457026,
+  "entry": "renderer preload -> IPC -> native helper",
+  "newWindowIds": [],
+  "noAiRequestSent": true
+}
